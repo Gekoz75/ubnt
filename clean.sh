@@ -31,6 +31,14 @@ apt-mark hold linux-image* grub* initramfs-tools 2>/dev/null || true
 echo "Held packages: $(apt-mark showhold)"
 
 # Phase 2: Stop and disable services
+
+# Force kill any running UniFi processes first
+echo "Force stopping all UniFi processes..."
+systemctl stop bt-proxy 2>/dev/null || true
+pkill -9 -f "unifi" 2>/dev/null || true
+pkill -9 -f "java.*unifi" 2>/dev/null || true
+sleep 3
+
 echo "🛑 Stopping and disabling services..."
 SERVICES=(
     unifi
@@ -111,6 +119,51 @@ echo "🔍 Checking for remaining UBNT packages..."
 dpkg -l | grep -i unifi || echo "No UniFi packages found"
 dpkg -l | grep -i ubnt || echo "No UBNT packages found" 
 dpkg -l | grep -i bt-proxy || echo "No bt-proxy packages found"
+
+# Phase 5.5: Force cleanup of remaining UniFi packages and processes
+echo "🔧 Force cleaning remaining UniFi components..."
+
+# Kill any remaining UniFi processes
+echo "Terminating UniFi processes..."
+pkill -f unifi || true
+pkill -f java || true
+sleep 2
+
+# Force remove the stuck UniFi package
+echo "Force removing stuck UniFi package..."
+dpkg --purge --force-remove-reinstreq unifi || true
+
+# Remove remaining UBNT packages
+echo "Removing remaining UBNT packages..."
+REMAINING_PACKAGES=(
+    ubnt-unifi-setup
+    ubnt-systemhub
+    ubnt-crash-report
+)
+
+for PKG in "${REMAINING_PACKAGES[@]}"; do
+    if dpkg -l | grep -q "$PKG"; then
+        echo "Removing: $PKG"
+        apt-get purge -y "$PKG" || true
+    fi
+done
+
+# Remove UniFi user and group
+echo "Cleaning up UniFi user accounts..."
+userdel -f unifi 2>/dev/null || true
+groupdel unifi 2>/dev/null || true
+
+# Clean up leftover directories
+echo "Cleaning leftover directories..."
+rm -rf /var/lib/unifi /etc/unifi /var/log/unifi /usr/lib/unifi 2>/dev/null || true
+
+
+# Verify package removal one more time: 
+echo "🔍 Checking for remaining UBNT packages..."
+dpkg -l | grep -i unifi || echo "No UniFi packages found"
+dpkg -l | grep -i ubnt || echo "No UBNT packages found" 
+dpkg -l | grep -i bt-proxy || echo "No bt-proxy packages found"
+
 
 # Phase 6: Clean up APT and system
 echo "🧹 Cleaning APT and system..."
