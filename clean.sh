@@ -159,7 +159,7 @@ rm -rf /var/lib/unifi /etc/unifi /var/log/unifi /usr/lib/unifi 2>/dev/null || tr
 
 
 # Verify package removal one more time: 
-echo "🔍 Checking for remaining UBNT packages..."
+echo "🔍 Checking FINALY for remaining UBNT packages..."
 dpkg -l | grep -i unifi || echo "No UniFi packages found"
 dpkg -l | grep -i ubnt || echo "No UBNT packages found" 
 dpkg -l | grep -i bt-proxy || echo "No bt-proxy packages found"
