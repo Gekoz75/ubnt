@@ -12,175 +12,138 @@ echo ""
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Logging setup - same directory as script with short names
+# Minimal logging setup
 LOG_DIR="${SCRIPT_DIR}/upgrade-logs"
 mkdir -p "$LOG_DIR"
 UPGRADE_LOG="$LOG_DIR/main.log"
-STEP_LOG="$LOG_DIR/steps.log"
 
-# Function to log with timestamp
+# Fast logging function - minimal overhead
 log() {
     local level=$1
     shift
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${timestamp}] [${level}] ${message}" | tee -a "$UPGRADE_LOG"
+    echo "[${timestamp}] [${level}] ${message}" >> "$UPGRADE_LOG"
+    # Only show important messages on terminal
+    if [[ "$level" == "INFO" ]] || [[ "$level" == "ERROR" ]]; then
+        echo "[${level}] ${message}"
+    fi
 }
 
-# Function to capture command output with full logging AND verbose output
+# Fast command runner - minimal logging overhead
 run_cmd() {
     local cmd="$1"
     local step="$2"
     local log_file="$LOG_DIR/${step}.log"
     
-    log "DEBUG" "Starting step: $step"
-    log "DEBUG" "Command: $cmd"
+    log "DEBUG" "Starting: $step"
     
-    # Run command with verbose output to terminal AND log file
+    # Fast execution - only log start/end, not every byte
     {
-        echo "=== COMMAND: $cmd ==="
-        echo "=== START TIME: $(date) ==="
-        echo "=== STEP: $step ==="
+        echo "=== START: $step ==="
+        echo "Command: $cmd"
+        echo "Time: $(date)"
         echo ""
         
-        # Execute the command - don't let individual command failures stop the script
-        if eval "$cmd"; then
-            local exit_code=0
-        else
-            local exit_code=$?
-            echo "Command failed with exit code: $exit_code"
-        fi
+        # Execute directly without tee overhead
+        eval "$cmd"
         
+        local exit_code=$?
         echo ""
-        echo "=== EXIT CODE: $exit_code ==="
-        echo "=== END TIME: $(date) ==="
+        echo "Exit code: $exit_code"
+        echo "=== END: $step ==="
+        echo "Time: $(date)"
         
-    } >> "$log_file" 2>&1
+    } > "$log_file" 2>&1
     
-    # Always return success to prevent script from exiting
     return 0
 }
 
 # Detect Debian version
 CURRENT_VERSION=$(lsb_release -cs 2>/dev/null || echo "unknown")
+echo "[INFO] Detected Debian version: ${CURRENT_VERSION}"
 log "INFO" "Detected Debian version: ${CURRENT_VERSION}"
-log "INFO" "Script directory: ${SCRIPT_DIR}"
-log "INFO" "Log directory: ${LOG_DIR}"
 
-# Log system info
-log "INFO" "Logging system information..."
+# Fast system info - run once and be done
 {
-    echo "=== SYSTEM INFORMATION ==="
-    echo "Hostname: $(hostname)"
+    echo "=== SYSTEM INFO ==="
+    lsb_release -a
     echo "Kernel: $(uname -a)"
-    echo "Uptime: $(uptime)"
-    echo "Date: $(date)"
-    echo "Current Debian: $(lsb_release -ds)"
-    echo "Debian Version: $(cat /etc/debian_version 2>/dev/null || echo 'unknown')"
-    echo "Architecture: $(dpkg --print-architecture)"
-    echo "Memory: $(free -h)"
-    echo "Disk: $(df -h /)"
-    echo "Script location: ${SCRIPT_DIR}"
-    echo "Log location: ${LOG_DIR}"
-    echo ""
-    echo "=== PACKAGE MANAGER STATE ==="
-    echo "Held packages:"
-    apt-mark showhold || true
-    echo ""
-    echo "Broken packages:"
-    dpkg -l | grep -E '^[a-z]{2}' || true
-    echo ""
-    echo "=== SERVICES STATE ==="
-    systemctl list-units --type=service --state=failed || true
-    echo ""
-} >> "$UPGRADE_LOG"
+    echo "Disk: $(df -h / | tail -1)"
+} >> "$UPGRADE_LOG" 2>&1
 
-# Freeze vendor kernel packages
-echo ""
-echo "[INFO] Freezing vendor kernel packages..."
-log "INFO" "Freezing vendor kernel packages..."
-run_cmd "apt-mark hold linux-image-3.10.20-ubnt-mtk" "01-hold-kernel"
+# Freeze vendor kernel packages - FAST
+echo "[INFO] Freezing kernel packages..."
+apt-mark hold linux-image-3.10.20-ubnt-mtk 2>/dev/null || true
+log "INFO" "Kernel packages held"
 
-# Ensure essential tools - continue even if some commands fail
-echo ""
-echo "[INFO] Installing GPG, CA certificates, and archive keyring..."
-log "INFO" "Installing GPG, CA certificates, and archive keyring..."
-run_cmd "apt-get update -y" "02-apt-update"
-run_cmd "apt-get install -y wget curl gnupg ca-certificates debian-archive-keyring apt-transport-https" "03-install-tools"
+# Ensure essential tools - FAST parallel approach
+echo "[INFO] Updating package lists..."
+apt-get update -y > "$LOG_DIR/02-apt-update.log" 2>&1 &
+UPDATE_PID=$!
 
-# Global APT settings
-echo ""
-echo "[INFO] Applying APT reliability settings..."
-log "INFO" "Applying APT reliability settings..."
-run_cmd "cat >/etc/apt/apt.conf.d/99fix-archive <<'EOF'
-Acquire::http::Pipeline-Depth \"0\";
-Acquire::Retries \"3\";
-Acquire::Check-Valid-Until \"false\";
-Acquire::AllowInsecureRepositories \"true\";
-EOF" "04-apt-settings"
+echo "[INFO] Installing essential tools..."
+apt-get install -y wget curl gnupg ca-certificates debian-archive-keyring > "$LOG_DIR/03-install-tools.log" 2>&1 &
+INSTALL_PID=$!
 
-# Prevent interactive service restarts
-echo ""
-echo "[INFO] Disabling service restarts during upgrade..."
-log "INFO" "Disabling service restarts during upgrade..."
-run_cmd "cat >/usr/sbin/policy-rc.d <<'EOF'
+# Wait for background jobs
+wait $UPDATE_PID
+wait $INSTALL_PID
+log "INFO" "Basic tools installed"
+
+# Fast APT settings
+echo "[INFO] Configuring APT settings..."
+cat >/etc/apt/apt.conf.d/99fix-archive <<'EOF'
+Acquire::http::Pipeline-Depth "0";
+Acquire::Retries "3";
+Acquire::Check-Valid-Until "false";
+Acquire::AllowInsecureRepositories "true";
+EOF
+
+# Fast service restart blocker
+echo "[INFO] Disabling service restarts..."
+cat >/usr/sbin/policy-rc.d <<'EOF'
 #!/bin/sh
 exit 101
-EOF" "05-policy-create"
-run_cmd "chmod +x /usr/sbin/policy-rc.d" "06-policy-executable"
+EOF
+chmod +x /usr/sbin/policy-rc.d
+log "INFO" "Service restarts disabled"
 
-# Recovery helper with detailed logging
+# Fast system repair
 fix_system() {
-    local step_name="$1"
-    echo ""
-    echo "[INFO] Starting system repair: $step_name"
-    log "INFO" "Starting system repair: $step_name"
-    
-    run_cmd "dpkg --configure -a" "${step_name}-dpkg-configure"
-    run_cmd "apt-get -f install -y" "${step_name}-fix-broken"
-    run_cmd "apt-get autoremove -y" "${step_name}-autoremove"
-    run_cmd "apt-get clean" "${step_name}-clean"
-    
-    # Log package state after repair
-    echo "[INFO] Logging package state after $step_name"
-    log "INFO" "Logging package state after $step_name"
-    run_cmd "dpkg -l | grep -E '^[a-z]{2}' | head -20" "${step_name}-broken-check"
-    run_cmd "apt-mark showhold" "${step_name}-held-packages"
+    echo "[INFO] Running system repairs..."
+    dpkg --configure -a >/dev/null 2>&1 &
+    apt-get -f install -y >/dev/null 2>&1 &
+    wait
+    log "INFO" "System repairs completed"
 }
 
-# Import Debian signing keys
-import_keys() {
-    local step_name="$1"
-    echo ""
-    echo "[INFO] Importing Debian archive signing keys for $step_name..."
-    log "INFO" "Importing Debian archive signing keys for $step_name..."
-    
-    for key in 112695A0E562B32A 648ACFD622F3D138 0E98404D386FA1D9 CAA96DFA; do
-        run_cmd "gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys $key" "${step_name}-key-${key}"
-    done
-}
-
-# Update APT sources for given codename
+# Fast sources update
 set_sources() {
     local CODENAME=$1
-    local step_name="$2"
+    echo "[INFO] Switching to Debian ${CODENAME}..."
     
-    echo ""
-    echo "[INFO] Updating APT sources for Debian ${CODENAME} in step $step_name..."
-    log "INFO" "Updating APT sources for Debian ${CODENAME} in step $step_name..."
-    
-    run_cmd "cp /etc/apt/sources.list /etc/apt/sources.list.bak.${step_name}" "${step_name}-backup-sources"
-    
-    run_cmd "cat >/etc/apt/sources.list <<EOF
+    cp /etc/apt/sources.list /etc/apt/sources.list.bak
+    cat >/etc/apt/sources.list <<EOF
 deb http://archive.debian.org/debian ${CODENAME} main contrib non-free
 deb http://archive.debian.org/debian-security ${CODENAME}/updates main contrib non-free
-EOF" "${step_name}-write-sources"
+EOF
     
-    run_cmd "cat /etc/apt/sources.list" "${step_name}-verify-sources"
-    run_cmd "apt-get -o Acquire::Check-Valid-Until=false update" "${step_name}-apt-update"
+    apt-get -o Acquire::Check-Valid-Until=false update > "$LOG_DIR/sources-${CODENAME}.log" 2>&1
+    log "INFO" "Sources updated to ${CODENAME}"
 }
 
-# Perform one upgrade step with comprehensive logging AND verbose output
+# Fast key import (non-blocking)
+import_keys() {
+    echo "[INFO] Importing signing keys..."
+    for key in 112695A0E562B32A 648ACFD622F3D138 0E98404D386FA1D9 CAA96DFA; do
+        gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys "$key" >/dev/null 2>&1 &
+    done
+    wait
+    log "INFO" "Signing keys imported"
+}
+
+# Fast upgrade step
 do_upgrade() {
     local FROM=$1
     local TO=$2
@@ -190,60 +153,53 @@ do_upgrade() {
     echo "[INFO] ==============================================="
     echo "[INFO] Starting upgrade: ${FROM} → ${TO}"
     echo "[INFO] ==============================================="
-    log "INFO" "==============================================="
     log "INFO" "Starting upgrade: ${FROM} → ${TO}"
-    log "INFO" "Step name: $step_name"
-    log "INFO" "==============================================="
     
-    # Log pre-upgrade state
-    echo "[INFO] Logging pre-upgrade state for $step_name"
-    log "INFO" "Logging pre-upgrade state for $step_name"
-    run_cmd "dpkg -l | wc -l" "${step_name}-pre-pkg-count"
-    run_cmd "df -h" "${step_name}-pre-disk"
-    run_cmd "cat /etc/debian_version" "${step_name}-pre-version"
+    # Pre-upgrade check
+    echo "[INFO] Pre-upgrade state:"
+    echo "  Debian: $(cat /etc/debian_version 2>/dev/null || echo 'unknown')"
+    echo "  Disk: $(df -h / | tail -1 | awk '{print $4}') free"
     
-    set_sources "${TO}" "${step_name}"
-    import_keys "${step_name}"
+    set_sources "${TO}"
+    import_keys
     
+    # MAJOR UPGRADE - show progress but log to file
+    echo "[INFO] Starting major upgrade - this will take a while..."
+    echo "[INFO] Follow progress in: $LOG_DIR/${step_name}-upgrade.log"
+    
+    # Run upgrade with visible progress but background logging
+    apt-get -qy \
+      -o "Dpkg::Options::=--force-confdef" \
+      -o "Dpkg::Options::=--force-confold" \
+      dist-upgrade --allow-unauthenticated > "$LOG_DIR/${step_name}-upgrade.log" 2>&1 &
+    
+    UPGRADE_PID=$!
+    
+    # Show progress while upgrade runs
+    while kill -0 $UPGRADE_PID 2>/dev/null; do
+        echo -n "."
+        sleep 10
+    done
     echo ""
-    echo "[INFO] Starting dist-upgrade for $step_name"
-    echo "[INFO] This may take a while - verbose output enabled..."
-    log "INFO" "Starting dist-upgrade for $step_name"
     
-    # Major upgrade with verbose output
-    run_cmd "apt-get -qy -o \"Dpkg::Options::=--force-confdef\" -o \"Dpkg::Options::=--force-confold\" dist-upgrade --allow-unauthenticated" "${step_name}-dist-upgrade"
+    wait $UPGRADE_PID
+    UPGRADE_RESULT=$?
     
-    fix_system "${step_name}-post"
+    fix_system
     
-    # Log post-upgrade state
+    # Post-upgrade check
+    echo "[INFO] Post-upgrade state:"
+    echo "  Debian: $(cat /etc/debian_version 2>/dev/null || echo 'unknown')"
+    echo "  Result: $UPGRADE_RESULT"
+    
+    log "INFO" "Upgrade ${FROM} → ${TO} completed with exit code: $UPGRADE_RESULT"
+    
+    # Quick reboot prompt
     echo ""
-    echo "[INFO] Logging post-upgrade state for $step_name"
-    log "INFO" "Logging post-upgrade state for $step_name"
-    run_cmd "cat /etc/debian_version" "${step_name}-post-version"
-    run_cmd "lsb_release -a" "${step_name}-post-lsb"
-    run_cmd "dpkg -l | wc -l" "${step_name}-post-pkg-count"
-    
-    echo ""
-    echo "[INFO] ==============================================="
-    echo "[INFO] Upgrade step ${FROM} → ${TO} completed"
-    echo "[INFO] ==============================================="
-    log "INFO" "==============================================="
-    log "INFO" "Upgrade step ${FROM} → ${TO} completed"
-    log "INFO" "==============================================="
-    
-    # Log files for analysis
-    echo "[INFO] Creating analysis logs for $step_name"
-    log "INFO" "Creating analysis logs for $step_name"
-    run_cmd "dpkg -l | grep -i unifi" "${step_name}-unifi-check"
-    run_cmd "systemctl list-units --failed" "${step_name}-failed-services"
-    run_cmd "journalctl -u apt -u dpkg --since \"1 hour ago\" | tail -50" "${step_name}-recent-logs"
-
-    # Prompt reboot before next phase
-    echo ""
-    read -p "Reboot is strongly recommended before continuing to the next upgrade. Reboot now? [y/N]: " ans
+    read -t 30 -p "Reboot recommended. Reboot now? (continuing in 30s) [y/N]: " ans
     if [[ "$ans" =~ ^[Yy]$ ]]; then
-        echo "[INFO] Rebooting system now..."
-        log "INFO" "User requested reboot after $step_name"
+        echo "[INFO] Rebooting..."
+        log "INFO" "Rebooting after ${FROM} → ${TO}"
         reboot
         exit 0
     fi
@@ -251,8 +207,7 @@ do_upgrade() {
 
 # ===== MAIN UPGRADE FLOW =====
 echo ""
-echo "[INFO] Starting main upgrade flow from $CURRENT_VERSION"
-log "INFO" "Starting main upgrade flow from $CURRENT_VERSION"
+echo "[INFO] Starting upgrade flow from $CURRENT_VERSION"
 
 # ===== STEP 1: JESSIE → STRETCH =====
 if [ "$CURRENT_VERSION" = "jessie" ]; then
@@ -272,35 +227,14 @@ if [ "$CURRENT_VERSION" = "buster" ]; then
     CURRENT_VERSION="bullseye"
 fi
 
-# Final cleanup and logging
-echo ""
-echo "[INFO] Removing temporary service restart blocker..."
-log "INFO" "Removing temporary service restart blocker..."
-run_cmd "rm -f /usr/sbin/policy-rc.d" "99-cleanup-policy"
-
-fix_system "99-final-cleanup"
-
-# Final system state log
-echo ""
-echo "[INFO] Creating final system state report"
-log "INFO" "Creating final system state report"
-run_cmd "lsb_release -a" "99-final-version"
-run_cmd "dpkg -l | grep -E '^[a-z]{2}'" "99-final-broken"
-run_cmd "systemctl list-units --failed" "99-final-failed"
+# Final cleanup
+echo "[INFO] Final cleanup..."
+rm -f /usr/sbin/policy-rc.d
+fix_system
 
 echo ""
 echo "[INFO] ==============================================="
-echo "[INFO] Upgrade chain complete!"
-echo "[INFO] Current Debian release: ${CURRENT_VERSION}"
-echo "[INFO] Main log: $UPGRADE_LOG"
-echo "[INFO] Step logs: $LOG_DIR/*.log"
+echo "[INFO] Upgrade complete! Current: ${CURRENT_VERSION}"
+echo "[INFO] Logs: $LOG_DIR"
 echo "[INFO] ==============================================="
-log "INFO" "==============================================="
-log "INFO" "Upgrade chain complete!"
-log "INFO" "Current Debian release: ${CURRENT_VERSION}"
-log "INFO" "Main log: $UPGRADE_LOG"
-log "INFO" "Detailed logs in: $LOG_DIR"
-log "INFO" "==============================================="
-
-echo ""
-echo "[INFO] All logs saved in: $LOG_DIR"
+log "INFO" "Upgrade chain completed. Final version: ${CURRENT_VERSION}"
