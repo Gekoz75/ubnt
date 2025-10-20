@@ -1,5 +1,4 @@
 #!/bin/bash
-set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
@@ -16,7 +15,6 @@ export DEBIAN_FRONTEND=noninteractive
 # Logging setup - same directory as script with short names
 LOG_DIR="${SCRIPT_DIR}/upgrade-logs"
 mkdir -p "$LOG_DIR"
-CURRENT_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 UPGRADE_LOG="$LOG_DIR/main.log"
 STEP_LOG="$LOG_DIR/steps.log"
 
@@ -45,28 +43,22 @@ run_cmd() {
         echo "=== STEP: $step ==="
         echo ""
         
-        # Execute the command - output goes to both terminal and log file via tee
-        # Use eval to properly handle complex commands with pipes/redirects
-        if [[ "$cmd" == *"dist-upgrade"* ]] || [[ "$cmd" == *"apt-get"* ]]; then
-            # For apt commands, show verbose progress but capture everything
-            eval "$cmd" 2>&1 | tee -a "$STEP_LOG"
+        # Execute the command - don't let individual command failures stop the script
+        if eval "$cmd"; then
+            local exit_code=0
         else
-            # For other commands, normal execution
-            eval "$cmd"
+            local exit_code=$?
+            echo "Command failed with exit code: $exit_code"
         fi
         
-        local exit_code=${PIPESTATUS[0]}
         echo ""
         echo "=== EXIT CODE: $exit_code ==="
         echo "=== END TIME: $(date) ==="
         
-        return $exit_code
     } >> "$log_file" 2>&1
     
-    local result=$?
-    log "DEBUG" "Step $step completed with exit code: $result"
-    
-    return $result
+    # Always return success to prevent script from exiting
+    return 0
 }
 
 # Detect Debian version
@@ -93,13 +85,13 @@ log "INFO" "Logging system information..."
     echo ""
     echo "=== PACKAGE MANAGER STATE ==="
     echo "Held packages:"
-    apt-mark showhold
+    apt-mark showhold || true
     echo ""
     echo "Broken packages:"
     dpkg -l | grep -E '^[a-z]{2}' || true
     echo ""
     echo "=== SERVICES STATE ==="
-    systemctl list-units --type=service --state=failed
+    systemctl list-units --type=service --state=failed || true
     echo ""
 } >> "$UPGRADE_LOG"
 
@@ -107,9 +99,9 @@ log "INFO" "Logging system information..."
 echo ""
 echo "[INFO] Freezing vendor kernel packages..."
 log "INFO" "Freezing vendor kernel packages..."
-run_cmd "apt-mark hold linux-image-3.10.20-ubnt-mtk || true" "01-hold-kernel"
+run_cmd "apt-mark hold linux-image-3.10.20-ubnt-mtk" "01-hold-kernel"
 
-# Ensure essential tools
+# Ensure essential tools - continue even if some commands fail
 echo ""
 echo "[INFO] Installing GPG, CA certificates, and archive keyring..."
 log "INFO" "Installing GPG, CA certificates, and archive keyring..."
@@ -164,7 +156,7 @@ import_keys() {
     log "INFO" "Importing Debian archive signing keys for $step_name..."
     
     for key in 112695A0E562B32A 648ACFD622F3D138 0E98404D386FA1D9 CAA96DFA; do
-        run_cmd "gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys $key || true" "${step_name}-key-${key}"
+        run_cmd "gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys $key" "${step_name}-key-${key}"
     done
 }
 
@@ -177,7 +169,7 @@ set_sources() {
     echo "[INFO] Updating APT sources for Debian ${CODENAME} in step $step_name..."
     log "INFO" "Updating APT sources for Debian ${CODENAME} in step $step_name..."
     
-    run_cmd "cp /etc/apt/sources.list /etc/apt/sources.list.bak.${step_name}.$(date +%s)" "${step_name}-backup-sources"
+    run_cmd "cp /etc/apt/sources.list /etc/apt/sources.list.bak.${step_name}" "${step_name}-backup-sources"
     
     run_cmd "cat >/etc/apt/sources.list <<EOF
 deb http://archive.debian.org/debian ${CODENAME} main contrib non-free
