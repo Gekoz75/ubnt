@@ -25,12 +25,24 @@ if [[ -z "$1" || "$1" != "--force" ]]; then
     fi
 fi
 
-# Phase 1: Hold critical packages to preserve system
+# ========== PHASE 0: CRITICAL DPKG HOOK CLEANUP ==========
+echo "🔧 REMOVING UBNT DPKG HOOKS (Critical for upgrades)..."
+sudo rm -f /etc/dpkg/dpkg.cfg.d/015-ubnt-dpkg-status
+sudo rm -f /etc/dpkg/dpkg.cfg.d/020-ubnt-dpkg-cache
+sudo rm -f /etc/dpkg/dpkg.cfg.d/*ubnt*
+sudo rm -rf /sbin/ubnt-*           # Removes the hook scripts
+sudo rm -f /var/lib/dpkg/triggers/* # Clears cached trigger info  
+sudo pkill -f dpkg                 # Kills processes holding hook refs
+sudo dpkg --configure -a --force-all --no-triggers # Completes ops without hooks
+echo "✅ DPKG hooks removed and system reconfigured"
+
+# ========== PHASE 1: HOLD CRITICAL PACKAGES ==========
 echo "📦 Holding critical packages..."
 apt-mark hold linux-image* grub* initramfs-tools 2>/dev/null || true
 echo "Held packages: $(apt-mark showhold)"
 
-# Phase 2: Stop and disable services
+# ========== PHASE 2: STOP SERVICES ==========
+echo "🛑 Stopping and disabling services..."
 
 # Force kill any running UniFi processes first
 echo "Force stopping all UniFi processes..."
@@ -39,18 +51,9 @@ pkill -9 -f "unifi" 2>/dev/null || true
 pkill -9 -f "java.*unifi" 2>/dev/null || true
 sleep 3
 
-echo "🛑 Stopping and disabling services..."
 SERVICES=(
-    unifi
-    cloudkey-webui
-    ubnt-freeradius-setup
-    ubnt-unifi-setup
-    ubnt-systemhub
-    nginx
-    php5-fpm
-    mongod
-    mongodb
-    freeradius
+    unifi cloudkey-webui ubnt-freeradius-setup ubnt-unifi-setup 
+    ubnt-systemhub nginx php5-fpm mongod mongodb freeradius
 )
 
 for SVC in "${SERVICES[@]}"; do
@@ -68,7 +71,7 @@ done
 echo "🔍 Checking for remaining UniFi services..."
 systemctl list-units --type=service | grep -i unifi || echo "No UniFi services found"
 
-# Phase 3: Backup critical UBNT tools before removal
+# ========== PHASE 3: BACKUP CRITICAL TOOLS ==========
 echo "💾 Backing up critical UBNT tools..."
 CRITICAL_TOOLS=(
     "/sbin/ubnt-systool"
@@ -83,103 +86,75 @@ for TOOL in "${CRITICAL_TOOLS[@]}"; do
     fi
 done
 
-# Phase 4: Remove APT sources first
+# ========== PHASE 4: REMOVE APT SOURCES ==========
 echo "🗑️ Removing APT sources..."
 rm -rfv /etc/apt/sources.list.d/* || true
 
-# Phase 5: Package removal sequence
+# ========== PHASE 5: PACKAGE REMOVAL ==========
 echo "📦 Removing packages..."
 
-# First, try to remove packages that might be on read-only partition
-READONLY_PACKAGES=(
-    openjdk-8-jre-headless
-    php5*
-    nodejs*
-    nginx*
-    libmariadb3
-    mongodb-clients
-    mysql-common
-    freeradius*
+# Remove APT sources first to prevent reinstallation
+rm -rf /etc/apt/sources.list.d/ubnt-unifi.list 2>/dev/null || true
+
+# Package removal in order of dependency
+PACKAGE_GROUPS=(
+    # First: Force remove core UniFi packages
+    "unifi"
+    
+    # Second: Remove UBNT management packages  
+    "ubnt-unifi-setup ubnt-systemhub ubnt-crash-report bt-proxy"
+    
+    # Third: Remove dependencies
+    "openjdk-8-jre-headless php5* nodejs* nginx* libmariadb3 mongodb-clients mysql-common freeradius*"
+    
+    # Fourth: Clean up any remaining
+    "unifi* ubnt*"
 )
 
-for PKG in "${READONLY_PACKAGES[@]}"; do
-    if dpkg -l | grep -q "$PKG"; then
-        echo "Attempting to remove: $PKG"
-        apt-get remove --purge -y "$PKG" || true
-    fi
+for PKG_GROUP in "${PACKAGE_GROUPS[@]}"; do
+    echo "Processing: $PKG_GROUP"
+    for PKG in $PKG_GROUP; do
+        if dpkg -l | grep -q "$PKG"; then
+            echo "Removing: $PKG"
+            apt-get remove --purge -y "$PKG" 2>/dev/null || true
+            dpkg --purge --force-remove-reinstreq "$PKG" 2>/dev/null || true
+        fi
+    done
 done
 
-# Force remove UniFi packages
-echo "🔨 Force removing UniFi packages..."
-dpkg -P unifi 2>/dev/null || true
-apt-get purge --auto-remove -y unifi* ubnt* bt-proxy 2>/dev/null || true
-
-# Verify package removal
-echo "🔍 Checking for remaining UBNT packages..."
-dpkg -l | grep -i unifi || echo "No UniFi packages found"
-dpkg -l | grep -i ubnt || echo "No UBNT packages found" 
-dpkg -l | grep -i bt-proxy || echo "No bt-proxy packages found"
-
-# Phase 5.5: Force cleanup of remaining UniFi packages and processes
-echo "🔧 Force cleaning remaining UniFi components..."
-
-# Kill any remaining UniFi processes
-echo "Terminating UniFi processes..."
-pkill -f unifi || true
-pkill -f java || true
-sleep 2
-
-# Force remove the stuck UniFi package
-echo "Force removing stuck UniFi package..."
-dpkg --purge --force-remove-reinstreq unifi || true
-
-# Remove remaining UBNT packages
-echo "Removing remaining UBNT packages..."
-REMAINING_PACKAGES=(
-    ubnt-unifi-setup
-    ubnt-systemhub
-    ubnt-crash-report
-)
-
-for PKG in "${REMAINING_PACKAGES[@]}"; do
-    if dpkg -l | grep -q "$PKG"; then
-        echo "Removing: $PKG"
-        apt-get purge -y "$PKG" || true
-    fi
-done
+# ========== PHASE 6: CLEANUP LEFTOVERS ==========
+echo "🧹 Cleaning up leftovers..."
 
 # Remove UniFi user and group
-echo "Cleaning up UniFi user accounts..."
 userdel -f unifi 2>/dev/null || true
 groupdel unifi 2>/dev/null || true
 
-# Clean up leftover directories
-echo "Cleaning leftover directories..."
+# Clean up directories
 rm -rf /var/lib/unifi /etc/unifi /var/log/unifi /usr/lib/unifi 2>/dev/null || true
 
+# Remove config files
+rm -f /etc/apt/apt.conf.d/50unattended-upgrades.ucf-dist 2>/dev/null || true
 
-# Verify package removal one more time: 
-echo "🔍 Checking FINALY for remaining UBNT packages..."
-dpkg -l | grep -i unifi || echo "No UniFi packages found"
-dpkg -l | grep -i ubnt || echo "No UBNT packages found" 
-dpkg -l | grep -i bt-proxy || echo "No bt-proxy packages found"
+# ========== PHASE 7: FINAL SYSTEM CLEANUP ==========
+echo "🔧 Final system cleanup..."
 
+# Fix any package issues
+sudo dpkg --configure -a --force-all 2>/dev/null || true
+sudo apt-get -f install -y 2>/dev/null || true
 
-# Phase 6: Clean up APT and system
-echo "🧹 Cleaning APT and system..."
-sudo dpkg --configure -a || true
-sudo dpkg --configure --pending || true
-sudo apt-get -f install -y || true
+# Clean APT cache
 apt-get autoremove -y
 apt-get autoclean -y
 apt-get clean
 
-# Remove specific config files
-echo "🗑️ Removing leftover configuration files..."
-rm -f /etc/apt/apt.conf.d/50unattended-upgrades.ucf-dist 2>/dev/null || true
-
-# Phase 7: Final system verification
+# ========== PHASE 8: VERIFICATION ==========
 echo "✅ Final verification..."
+
+# Verify package removal
+echo "🔍 Checking for remaining UBNT packages..."
+dpkg -l | grep -i unifi || echo "✅ No UniFi packages found"
+dpkg -l | grep -i ubnt || echo "✅ No UBNT packages found" 
+dpkg -l | grep -i bt-proxy || echo "✅ No bt-proxy packages found"
 
 # Test LED system functionality
 if [[ -f /sbin/ubnt-systool && -d /sys/class/leds ]]; then
@@ -187,7 +162,7 @@ if [[ -f /sbin/ubnt-systool && -d /sys/class/leds ]]; then
     ubnt-systool led white on 2>/dev/null || true
     sleep 1
     ubnt-systool led white off 2>/dev/null || true
-    echo "LED system operational"
+    echo "✅ LED system operational"
 fi
 
 # Show held packages
@@ -196,7 +171,8 @@ apt-mark showhold
 
 echo ""
 echo "=== Cleanup Complete ==="
-echo "✅ Services stopped and disabled"
+echo "✅ DPKG hooks removed (critical for upgrades)"
+echo "✅ Services stopped and disabled" 
 echo "✅ Packages removed"
 echo "✅ System cleaned"
 echo "✅ Critical tools backed up to /root/"
