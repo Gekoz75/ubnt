@@ -25,23 +25,52 @@ if [[ -z "$1" || "$1" != "--force" ]]; then
     fi
 fi
 
-# ========== PHASE 0: CRITICAL DPKG HOOK CLEANUP ==========
+# ========== PHASE 0: CRITICAL BACKUP FIRST ==========
+echo "💾 CRITICAL: Backing up essential tools FIRST..."
+CRITICAL_TOOLS=(
+    "/sbin/ubnt-systool"
+    "/sbin/ubnt-dpkg-restore"
+)
+
+BACKUP_COUNT=0
+for TOOL in "${CRITICAL_TOOLS[@]}"; do
+    if [[ -f "$TOOL" ]]; then
+        BACKUP_PATH="/root/$(basename "$TOOL").backup"
+        echo "Backing up: $TOOL → $BACKUP_PATH"
+        cp "$TOOL" "$BACKUP_PATH"
+        chmod +x "$BACKUP_PATH" 2>/dev/null || true
+        
+        # Verify backup
+        if [[ -f "$BACKUP_PATH" ]]; then
+            echo "✅ SUCCESS: $(basename "$TOOL") backed up"
+            ((BACKUP_COUNT++))
+        else
+            echo "❌ FAILED to backup: $TOOL"
+        fi
+    else
+        echo "⚠️  Tool not found: $TOOL"
+    fi
+done
+
+echo "✅ Backed up $BACKUP_COUNT critical tools to /root/"
+
+# ========== PHASE 1: CRITICAL DPKG HOOK CLEANUP ==========
 echo "🔧 REMOVING UBNT DPKG HOOKS (Critical for upgrades)..."
 sudo rm -f /etc/dpkg/dpkg.cfg.d/015-ubnt-dpkg-status
 sudo rm -f /etc/dpkg/dpkg.cfg.d/020-ubnt-dpkg-cache
 sudo rm -f /etc/dpkg/dpkg.cfg.d/*ubnt*
-sudo rm -rf /sbin/ubnt-*           # Removes the hook scripts
+sudo rm -rf /sbin/ubnt-*           # Now safe - backups already created
 sudo rm -f /var/lib/dpkg/triggers/* # Clears cached trigger info  
 sudo pkill -f dpkg                 # Kills processes holding hook refs
 sudo dpkg --configure -a --force-all --no-triggers # Completes ops without hooks
 echo "✅ DPKG hooks removed and system reconfigured"
 
-# ========== PHASE 1: HOLD CRITICAL PACKAGES ==========
+# ========== PHASE 2: HOLD CRITICAL PACKAGES ==========
 echo "📦 Holding critical packages..."
 apt-mark hold linux-image* grub* initramfs-tools 2>/dev/null || true
 echo "Held packages: $(apt-mark showhold)"
 
-# ========== PHASE 2: STOP SERVICES ==========
+# ========== PHASE 3: STOP SERVICES ==========
 echo "🛑 Stopping and disabling services..."
 
 # Force kill any running UniFi processes first
@@ -70,21 +99,6 @@ done
 # Verify UniFi services are down
 echo "🔍 Checking for remaining UniFi services..."
 systemctl list-units --type=service | grep -i unifi || echo "No UniFi services found"
-
-# ========== PHASE 3: BACKUP CRITICAL TOOLS ==========
-echo "💾 Backing up critical UBNT tools..."
-CRITICAL_TOOLS=(
-    "/sbin/ubnt-systool"
-    "/sbin/ubnt-dpkg-restore"
-)
-
-for TOOL in "${CRITICAL_TOOLS[@]}"; do
-    if [[ -f "$TOOL" ]]; then
-        BACKUP_PATH="/root/$(basename "$TOOL").backup"
-        cp "$TOOL" "$BACKUP_PATH"
-        echo "Backed up $TOOL to $BACKUP_PATH"
-    fi
-done
 
 # ========== PHASE 4: REMOVE APT SOURCES ==========
 echo "🗑️ Removing APT sources..."
@@ -156,13 +170,27 @@ dpkg -l | grep -i unifi || echo "✅ No UniFi packages found"
 dpkg -l | grep -i ubnt || echo "✅ No UBNT packages found" 
 dpkg -l | grep -i bt-proxy || echo "✅ No bt-proxy packages found"
 
-# Test LED system functionality
+# Verify backups still exist
+echo "🔍 Verifying backup files..."
+if [[ -f "/root/ubnt-systool.backup" && -f "/root/ubnt-dpkg-restore.backup" ]]; then
+    echo "✅ Critical backups verified in /root/"
+else
+    echo "❌ CRITICAL: Backup files missing!"
+fi
+
+# Test LED system functionality using backup if needed
 if [[ -f /sbin/ubnt-systool && -d /sys/class/leds ]]; then
     echo "💡 Testing LED system..."
     ubnt-systool led white on 2>/dev/null || true
     sleep 1
     ubnt-systool led white off 2>/dev/null || true
     echo "✅ LED system operational"
+elif [[ -f /root/ubnt-systool.backup && -d /sys/class/leds ]]; then
+    echo "💡 Testing LED system from backup..."
+    /root/ubnt-systool.backup led white on 2>/dev/null || true
+    sleep 1
+    /root/ubnt-systool.backup led white off 2>/dev/null || true
+    echo "✅ LED system operational (from backup)"
 fi
 
 # Show held packages
@@ -171,11 +199,11 @@ apt-mark showhold
 
 echo ""
 echo "=== Cleanup Complete ==="
+echo "✅ Critical tools backed up to /root/"
 echo "✅ DPKG hooks removed (critical for upgrades)"
 echo "✅ Services stopped and disabled" 
 echo "✅ Packages removed"
 echo "✅ System cleaned"
-echo "✅ Critical tools backed up to /root/"
 echo ""
 echo "Recommended: Reboot system to ensure clean state"
 echo "Run with: sudo reboot"
