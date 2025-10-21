@@ -2,7 +2,7 @@
 # Ultimate Debian Post-Upgrade Validation Script
 # Comprehensive system health check with critical kernel protection
 
-set -e
+# REMOVED: set -e  # This was causing premature exits when backups are missing
 echo "=== DEBIAN POST-UPGRADE ULTIMATE VALIDATION ==="
 echo ""
 
@@ -53,8 +53,8 @@ echo "Debian: $DEBIAN_VERSION"
 echo "Kernel: $KERNEL_VERSION"
 
 if command -v lsb_release >/dev/null 2>&1; then
-    echo "Release: $(lsb_release -sd)"
-    echo "Codename: $(lsb_release -sc)"
+    echo "Release: $(lsb_release -sd 2>/dev/null || echo "unknown")"
+    echo "Codename: $(lsb_release -sc 2>/dev/null || echo "unknown")"
 fi
 
 # Version validation
@@ -80,9 +80,9 @@ else
 fi
 
 # Check for half-installed packages
-if dpkg -l | grep -q "^iF"; then
+if dpkg -l 2>/dev/null | grep -q "^iF"; then
     echo "❌ Half-configured packages found"
-    dpkg -l | grep "^iF"
+    dpkg -l 2>/dev/null | grep "^iF" || true
 else
     echo "✅ No half-configured packages"
 fi
@@ -101,11 +101,11 @@ else
 fi
 
 # Verify held packages
-HELD_COUNT=$(apt-mark showhold | wc -l)
+HELD_COUNT=$(apt-mark showhold 2>/dev/null | wc -l)
 echo "3. Held packages: $HELD_COUNT"
 if [ "$HELD_COUNT" -gt 0 ]; then
     echo "📋 Held packages:"
-    apt-mark showhold
+    apt-mark showhold 2>/dev/null
 fi
 
 # ========== PHASE 3: SERVICE HEALTH CHECK ==========
@@ -117,7 +117,7 @@ echo "---------------------------------"
 FAILED_SVCS=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
 if [ "$FAILED_SVCS" -gt 0 ]; then
     echo "❌ Failed services: $FAILED_SVCS"
-    systemctl --failed --no-legend
+    systemctl --failed --no-legend 2>/dev/null || true
 else
     echo "✅ No failed services"
 fi
@@ -144,7 +144,7 @@ fi
 UBNT_SERVICES=$(systemctl list-units --all --no-legend 2>/dev/null | grep -i "ubnt\|unifi" | wc -l)
 if [ "$UBNT_SERVICES" -gt 0 ]; then
     echo "⚠️  UBNT service leftovers: $UBNT_SERVICES"
-    systemctl list-units --all --no-legend | grep -i "ubnt\|unifi" | head -5
+    systemctl list-units --all --no-legend 2>/dev/null | grep -i "ubnt\|unifi" | head -5
 else
     echo "✅ No UBNT services found"
 fi
@@ -156,7 +156,7 @@ echo "------------------------------"
 
 # Interface status
 echo "5. Network interfaces:"
-ip -o addr show scope global | awk '{print "  " $2 ": " $4}' | head -5
+ip -o addr show scope global 2>/dev/null | awk '{print "  " $2 ": " $4}' | head -5
 
 # Connectivity tests
 echo "6. Connectivity tests:"
@@ -178,17 +178,17 @@ echo "💾 PHASE 5: Disk & Filesystem Health"
 echo "------------------------------------"
 
 # Disk space
-ROOT_USAGE=$(df -h / | awk 'NR==2 {print $5 " used (" $4 " free)"}')
+ROOT_USAGE=$(df -h / 2>/dev/null | awk 'NR==2 {print $5 " used (" $4 " free)"}' || echo "unknown")
 echo "7. Root filesystem: $ROOT_USAGE"
 
-if df -h / | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}'; then
+if df -h / 2>/dev/null | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}'; then
     echo "  ✅ Disk space: SUFFICIENT"
 else
     echo "  ❌ Disk space: CRITICAL (>90% used)"
 fi
 
 # Memory
-MEM_USAGE=$(free -h | awk 'NR==2 {print "Total: " $2 " | Used: " $3 " | Free: " $4}')
+MEM_USAGE=$(free -h 2>/dev/null | awk 'NR==2 {print "Total: " $2 " | Used: " $3 " | Free: " $4}' || echo "unknown")
 echo "8. Memory: $MEM_USAGE"
 
 # Filesystem health
@@ -232,7 +232,7 @@ echo "---------------------------"
 echo "9. System load: $(uptime | awk -F'load average:' '{print $2}')"
 
 # Zombie processes
-ZOMBIES=$(ps aux | awk '{print $8}' | grep -c Z)
+ZOMBIES=$(ps aux 2>/dev/null | awk '{print $8}' | grep -c Z || echo "0")
 if [ "$ZOMBIES" -gt 0 ]; then
     echo "❌ Zombie processes: $ZOMBIES"
 else
@@ -310,7 +310,7 @@ echo ""
 echo "=== VALIDATION SUMMARY ==="
 echo "✅ Debian Version: $DEBIAN_VERSION"
 echo "✅ Kernel: $KERNEL_VERSION"
-echo "✅ Uptime: $(uptime -p | sed 's/up //')"
+echo "✅ Uptime: $(uptime -p 2>/dev/null | sed 's/up //' || echo 'unknown')"
 echo "✅ Held Packages: $HELD_COUNT (kernel protected)"
 echo "✅ Critical Backups: $BACKUP_OK/2 verified"
 
@@ -318,7 +318,7 @@ echo "✅ Critical Backups: $BACKUP_OK/2 verified"
 ISSUES=0
 [ "$FAILED_SVCS" -gt 0 ] && ((ISSUES++))
 [ "$UBNT_FILES" -gt 10 ] && ((ISSUES++))
-df -h / | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}' || ((ISSUES++))
+df -h / 2>/dev/null | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}' || ((ISSUES++))
 ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || ((ISSUES++))
 [ $BACKUP_OK -lt 2 ] && ((ISSUES++))
 
