@@ -6,7 +6,33 @@ set -e
 echo "=== DEBIAN POST-UPGRADE ULTIMATE VALIDATION ==="
 echo ""
 
+# ========== CRITICAL: VERIFY BACKUP TOOLS EXIST ==========
+echo "💾 CRITICAL: Verifying backup tools..."
+CRITICAL_BACKUPS=(
+    "/root/ubnt-systool.backup"
+    "/root/ubnt-dpkg-restore.backup"
+)
+
+BACKUP_OK=0
+for BACKUP in "${CRITICAL_BACKUPS[@]}"; do
+    if [[ -f "$BACKUP" ]]; then
+        echo "✅ Backup found: $(basename "$BACKUP")"
+        ((BACKUP_OK++))
+    else
+        echo "❌ MISSING BACKUP: $(basename "$BACKUP")"
+        echo "   Run: ./clean.sh to create backups first!"
+    fi
+done
+
+if [ $BACKUP_OK -eq 2 ]; then
+    echo "✅ ALL critical backups verified"
+else
+    echo "⚠️  WARNING: Only $BACKUP_OK/2 backups found"
+    echo "   Some system tools may be missing"
+fi
+
 # ========== CRITICAL: PROTECT CUSTOM KERNEL ==========
+echo ""
 echo "🔒 CRITICAL: Verifying kernel protection..."
 sudo apt-mark hold linux-image-3.10.20-ubnt-mtk initramfs-tools >/dev/null 2>&1 || true
 HELD_PKGS=$(apt-mark showhold)
@@ -286,6 +312,7 @@ echo "✅ Debian Version: $DEBIAN_VERSION"
 echo "✅ Kernel: $KERNEL_VERSION"
 echo "✅ Uptime: $(uptime -p | sed 's/up //')"
 echo "✅ Held Packages: $HELD_COUNT (kernel protected)"
+echo "✅ Critical Backups: $BACKUP_OK/2 verified"
 
 # Overall health score
 ISSUES=0
@@ -293,6 +320,7 @@ ISSUES=0
 [ "$UBNT_FILES" -gt 10 ] && ((ISSUES++))
 df -h / | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}' || ((ISSUES++))
 ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || ((ISSUES++))
+[ $BACKUP_OK -lt 2 ] && ((ISSUES++))
 
 echo ""
 echo "🎯 RECOMMENDATIONS:"
@@ -309,10 +337,13 @@ fi
 
 echo ""
 echo "📋 Next steps:"
-echo "   1. Review any warnings above"
-echo "   2. Run: ./clean.sh --post-upgrade (if UBNT leftovers)"
-echo "   3. Reboot: sudo reboot"
-echo "   4. Run this check again after reboot"
+if [ $BACKUP_OK -lt 2 ]; then
+    echo "   1. RUN: ./clean.sh (to create missing backups)"
+fi
+echo "   2. Review any warnings above"
+echo "   3. Run: ./clean.sh --post-upgrade (if UBNT leftovers)"
+echo "   4. Reboot: sudo reboot"
+echo "   5. Run this check again after reboot"
 
 echo ""
 echo "💡 Remember: linux-image-3.10.20-ubnt-mtk is PROTECTED"
