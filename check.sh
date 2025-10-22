@@ -72,8 +72,9 @@ echo "----------------------------------"
 
 # Check for broken packages
 echo "1. Checking package consistency..."
-if sudo dpkg --audit 2>/dev/null; then
+if sudo dpkg --audit 2>/dev/null | grep -q .; then
     echo "❌ Broken packages found - run: sudo dpkg --configure -a"
+    sudo dpkg --audit 2>/dev/null | head -5
 else
     echo "✅ No broken packages"
 fi
@@ -127,12 +128,11 @@ fi
 
 # Check for common bloatware
 echo "6. Checking for common bloatware:"
-BLOAT_FOUND=0
-if apt list --installed 2>/dev/null | grep -q -E "(avahi|cups|exim4)"; then
+BLOAT_FOUND=$(apt list --installed 2>/dev/null | grep -c -E "(avahi|cups|exim4)" || echo "0")
+if [ "$BLOAT_FOUND" -gt 0 ]; then
     echo "   ❌ BLOATWARE FOUND:"
     apt list --installed 2>/dev/null | grep -E "(avahi|cups|exim4)" | while read pkg; do
         echo "      - $pkg"
-        ((BLOAT_FOUND++))
     done
 else
     echo "   ✅ No common bloatware detected"
@@ -179,7 +179,7 @@ else
 fi
 
 # Check for UBNT service leftovers
-UBNT_SERVICES=$(systemctl list-units --all --no-legend 2>/dev/null | grep -i "ubnt\|unifi" | wc -l)
+UBNT_SERVICES=$(systemctl list-units --all --no-legend 2>/dev/null | grep -i "ubnt\|unifi" | wc -l || echo "0")
 if [ "$UBNT_SERVICES" -gt 0 ]; then
     echo "⚠️  UBNT service leftovers: $UBNT_SERVICES"
     systemctl list-units --all --no-legend 2>/dev/null | grep -i "ubnt\|unifi" | head -5
@@ -219,10 +219,11 @@ echo "------------------------------------"
 ROOT_USAGE=$(df -h / 2>/dev/null | awk 'NR==2 {print $5 " used (" $4 " free)"}' || echo "unknown")
 echo "11. Root filesystem: $ROOT_USAGE"
 
-if df -h / 2>/dev/null | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}'; then
-    echo "  ✅ Disk space: SUFFICIENT"
-else
+ROOT_USAGE_PCT=$(df / 2>/dev/null | awk 'NR==2 {gsub("%",""); print $5}' | head -1 || echo "0")
+if [ "$ROOT_USAGE_PCT" -gt 90 ] 2>/dev/null; then
     echo "  ❌ Disk space: CRITICAL (>90% used)"
+else
+    echo "  ✅ Disk space: SUFFICIENT"
 fi
 
 # Memory
@@ -367,7 +368,7 @@ fi
 ISSUES=0
 [ "$FAILED_SVCS" -gt 0 ] && ((ISSUES++))
 [ "$UBNT_FILES" -gt 10 ] && ((ISSUES++))
-df -h / 2>/dev/null | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}' || ((ISSUES++))
+[ "$ROOT_USAGE_PCT" -gt 90 ] 2>/dev/null && ((ISSUES++))
 ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || ((ISSUES++))
 [ $BACKUP_OK -lt 2 ] && ((ISSUES++))
 [ $BLOAT_FOUND -gt 0 ] && ((ISSUES++))
