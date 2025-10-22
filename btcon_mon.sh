@@ -1,17 +1,12 @@
+# Create a fixed monitor script
+cat > btcon_mon_fixed.sh << 'EOF'
 #!/bin/bash
-# Bluetooth Status Monitor and Troubleshooting Script
-# Usage: ./bluetooth_mon.sh
-
-echo "=== Bluetooth Console Status Monitor ==="
-echo "Press Ctrl+C to stop monitoring"
-echo ""
+# Bluetooth Status Monitor - Fixed Version
 
 while true; do
     clear
-    echo "┌─────────────────────────────────────────────────────┐"
-    echo "│            BLUETOOTH CONSOLE MONITOR                │"
-    echo "│ $(date) │"
-    echo "└─────────────────────────────────────────────────────┘"
+    echo "=== Bluetooth Console Status Monitor ==="
+    echo "Time: $(date)"
     echo ""
     
     # Hardware Status
@@ -23,7 +18,8 @@ while true; do
         echo "📟 $(echo "$HCICONFIG" | grep "BD Address" | head -1)"
         echo "📊 $(echo "$HCICONFIG" | grep "UP\|DOWN" | head -1)"
         echo "👀 $(echo "$HCICONFIG" | grep "PSCAN\|ISCAN" | head -1)"
-        echo "🏷️  Name: $(echo "$HCICONFIG" | grep "Name" | cut -d: -f2 | sed 's/^ *//' || echo "Not set")"
+        NAME=$(echo "$HCICONFIG" | grep -o "Name: '[^']*'" | head -1 || echo "Name: Not set")
+        echo "🏷️  $NAME"
     else
         echo "❌ No Bluetooth interface found!"
     fi
@@ -33,18 +29,14 @@ while true; do
     # Process Status
     echo "🔄 PROCESS STATUS:"
     echo "─────────────────"
-    BLUETOOTHD_PID=$(pgrep bluetoothd)
-    if [ -n "$BLUETOOTHD_PID" ]; then
-        echo "✅ bluetoothd: RUNNING (PID: $BLUETOOTHD_PID)"
-        echo "   Command: $(ps -p $BLUETOOTHD_PID -o cmd=)"
+    if pgrep bluetoothd >/dev/null; then
+        echo "✅ bluetoothd: RUNNING"
     else
         echo "❌ bluetoothd: NOT RUNNING"
     fi
     
-    RFCOMM_PID=$(pgrep rfcomm)
-    if [ -n "$RFCOMM_PID" ]; then
-        echo "✅ rfcomm: RUNNING (PID: $RFCOMM_PID)"
-        echo "   Command: $(ps -p $RFCOMM_PID -o cmd=)"
+    if pgrep rfcomm >/dev/null; then
+        echo "✅ rfcomm: RUNNING"
     else
         echo "❌ rfcomm: NOT RUNNING"
     fi
@@ -54,16 +46,10 @@ while true; do
     # Service Status
     echo "📡 SERVICE STATUS:"
     echo "─────────────────"
-    if sudo sdptool browse local >/dev/null 2>&1; then
-        SERIAL_SERVICE=$(sudo sdptool browse local 2>/dev/null | grep -A10 "Serial Port" | head -5)
-        if [ -n "$SERIAL_SERVICE" ]; then
-            echo "✅ Serial Port: REGISTERED"
-            echo "   Channel: $(echo "$SERIAL_SERVICE" | grep "Channel" | cut -d: -f2 | tr -d ' ')"
-        else
-            echo "⚠️  Serial Port: NOT FOUND in SDP"
-        fi
+    if sudo sdptool browse local 2>/dev/null | grep -q "Serial Port"; then
+        echo "✅ Serial Port: REGISTERED"
     else
-        echo "❌ SDP Server: NOT AVAILABLE"
+        echo "❌ Serial Port: NOT REGISTERED"
     fi
     
     echo ""
@@ -73,7 +59,6 @@ while true; do
     echo "────────────────"
     if [ -e "/dev/rfcomm0" ]; then
         echo "✅ /dev/rfcomm0: EXISTS"
-        echo "   Permissions: $(ls -la /dev/rfcomm0 | cut -d' ' -f1)"
     else
         echo "❌ /dev/rfcomm0: NOT FOUND"
     fi
@@ -88,16 +73,14 @@ while true; do
         echo "📍 MAC Address: $MAC"
         echo "🔗 RFCOMM Channel: 1"
         echo "⚡ Baud Rate: 115200"
-        echo "👋 Device Name: $(hciconfig hci0 2>/dev/null | grep "Name" | cut -d: -f2 | sed 's/^ *//' || echo "Unknown")"
-    else
-        echo "❌ Cannot read Bluetooth info"
+        NAME=$(hciconfig hci0 2>/dev/null | grep -o "Name: '[^']*'" | cut -d"'" -f2)
+        echo "👋 Device Name: ${NAME:-Not set}"
     fi
     
     echo ""
-    echo "┌─────────────────────────────────────────────────────┐"
-    echo "│          Monitoring... (Refresh every 5s)           │"
-    echo "│        Press Ctrl+C to stop monitoring              │"
-    echo "└─────────────────────────────────────────────────────┘"
-    
+    echo "Press Ctrl+C to stop. Refreshing in 5s..."
     sleep 5
 done
+EOF
+
+chmod +x btcon_mon_fixed.sh
