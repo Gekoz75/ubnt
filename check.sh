@@ -2,7 +2,6 @@
 # Ultimate Debian Post-Upgrade Validation Script
 # Comprehensive system health check with critical kernel protection
 
-# REMOVED: set -e  # This was causing premature exits when backups are missing
 echo "=== DEBIAN POST-UPGRADE ULTIMATE VALIDATION ==="
 echo ""
 
@@ -108,6 +107,45 @@ if [ "$HELD_COUNT" -gt 0 ]; then
     apt-mark showhold 2>/dev/null
 fi
 
+# ========== NEW: BLOATWARE DETECTION ==========
+echo ""
+echo "🔍 BLOATWARE DETECTION"
+echo "----------------------"
+
+# Check largest packages
+echo "4. Largest packages (top 10):"
+dpkg-query -W --showformat='${Installed-Size}\t${Package}\n' 2>/dev/null | sort -nr | head -10
+
+# Check total package count
+TOTAL_PACKAGES=$(dpkg -l 2>/dev/null | grep -c '^ii' || echo "0")
+echo "5. Total installed packages: $TOTAL_PACKAGES"
+if [ "$TOTAL_PACKAGES" -gt 500 ]; then
+    echo "   ⚠️  High package count - consider cleanup"
+else
+    echo "   ✅ Reasonable package count for embedded system"
+fi
+
+# Check for common bloatware
+echo "6. Checking for common bloatware:"
+BLOAT_FOUND=0
+if apt list --installed 2>/dev/null | grep -q -E "(avahi|cups|exim4)"; then
+    echo "   ❌ BLOATWARE FOUND:"
+    apt list --installed 2>/dev/null | grep -E "(avahi|cups|exim4)" | while read pkg; do
+        echo "      - $pkg"
+        ((BLOAT_FOUND++))
+    done
+else
+    echo "   ✅ No common bloatware detected"
+fi
+
+# Check Debian-exim statoverride issue
+echo "7. Checking Debian-exim statoverride:"
+if grep -q "Debian-exim" /var/lib/dpkg/statoverride 2>/dev/null; then
+    echo "   ❌ Debian-exim in statoverride - WILL CAUSE UPGRADE FAILURES!"
+else
+    echo "   ✅ No Debian-exim statoverride issues"
+fi
+
 # ========== PHASE 3: SERVICE HEALTH CHECK ==========
 echo ""
 echo "🛠️ PHASE 3: Service Health Check"
@@ -123,7 +161,7 @@ else
 fi
 
 # Check critical services
-echo "4. Critical services status:"
+echo "8. Critical services status:"
 CRITICAL_SERVICES=("ssh" "systemd-journald" "dbus" "systemd-logind")
 for SERVICE in "${CRITICAL_SERVICES[@]}"; do
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
@@ -155,11 +193,11 @@ echo "🌐 PHASE 4: Network Validation"
 echo "------------------------------"
 
 # Interface status
-echo "5. Network interfaces:"
+echo "9. Network interfaces:"
 ip -o addr show scope global 2>/dev/null | awk '{print "  " $2 ": " $4}' | head -5
 
 # Connectivity tests
-echo "6. Connectivity tests:"
+echo "10. Connectivity tests:"
 if ping -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
     echo "  ✅ Internet connectivity: OK"
 else
@@ -179,7 +217,7 @@ echo "------------------------------------"
 
 # Disk space
 ROOT_USAGE=$(df -h / 2>/dev/null | awk 'NR==2 {print $5 " used (" $4 " free)"}' || echo "unknown")
-echo "7. Root filesystem: $ROOT_USAGE"
+echo "11. Root filesystem: $ROOT_USAGE"
 
 if df -h / 2>/dev/null | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}'; then
     echo "  ✅ Disk space: SUFFICIENT"
@@ -189,7 +227,7 @@ fi
 
 # Memory
 MEM_USAGE=$(free -h 2>/dev/null | awk 'NR==2 {print "Total: " $2 " | Used: " $3 " | Free: " $4}' || echo "unknown")
-echo "8. Memory: $MEM_USAGE"
+echo "12. Memory: $MEM_USAGE"
 
 # Filesystem health
 if touch /fs-test && rm /fs-test 2>/dev/null; then
@@ -229,7 +267,7 @@ echo "⚡ PHASE 7: System Stability"
 echo "---------------------------"
 
 # System load
-echo "9. System load: $(uptime | awk -F'load average:' '{print $2}')"
+echo "13. System load: $(uptime | awk -F'load average:' '{print $2}')"
 
 # Zombie processes
 ZOMBIES=$(ps aux 2>/dev/null | awk '{print $8}' | grep -c Z || echo "0")
@@ -299,6 +337,13 @@ if [ -f "/etc/fwupdate/post.d/020-ubnt-dpkg-restore" ]; then
     ((FIXES_APPLIED++))
 fi
 
+# Fix Debian-exim statoverride if needed
+if grep -q "Debian-exim" /var/lib/dpkg/statoverride 2>/dev/null; then
+    echo "🛠️  Fixing Debian-exim statoverride..."
+    sudo sed -i '/Debian-exim/d' /var/lib/dpkg/statoverride
+    ((FIXES_APPLIED++))
+fi
+
 if [ $FIXES_APPLIED -eq 0 ]; then
     echo "✅ No automatic fixes needed"
 else
@@ -313,6 +358,10 @@ echo "✅ Kernel: $KERNEL_VERSION"
 echo "✅ Uptime: $(uptime -p 2>/dev/null | sed 's/up //' || echo 'unknown')"
 echo "✅ Held Packages: $HELD_COUNT (kernel protected)"
 echo "✅ Critical Backups: $BACKUP_OK/2 verified"
+echo "📦 Total Packages: $TOTAL_PACKAGES"
+if [ $BLOAT_FOUND -gt 0 ]; then
+    echo "⚠️  Bloatware Packages: $BLOAT_FOUND"
+fi
 
 # Overall health score
 ISSUES=0
@@ -321,6 +370,7 @@ ISSUES=0
 df -h / 2>/dev/null | awk 'NR==2 {gsub("%",""); if ($5 > 90) exit 1}' || ((ISSUES++))
 ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || ((ISSUES++))
 [ $BACKUP_OK -lt 2 ] && ((ISSUES++))
+[ $BLOAT_FOUND -gt 0 ] && ((ISSUES++))
 
 echo ""
 echo "🎯 RECOMMENDATIONS:"
@@ -340,10 +390,14 @@ echo "📋 Next steps:"
 if [ $BACKUP_OK -lt 2 ]; then
     echo "   1. RUN: ./clean.sh (to create missing backups)"
 fi
-echo "   2. Review any warnings above"
-echo "   3. Run: ./clean.sh --post-upgrade (if UBNT leftovers)"
-echo "   4. Reboot: sudo reboot"
-echo "   5. Run this check again after reboot"
+if [ $BLOAT_FOUND -gt 0 ]; then
+    echo "   2. RUN BLOATWARE CLEANUP:"
+    echo "      sudo apt-get remove --purge -y avahi-daemon libavahi-* libcups2 exim4* && sudo sed -i '/Debian-exim/d' /var/lib/dpkg/statoverride && sudo apt-get autoremove --purge -y"
+fi
+echo "   3. Review any warnings above"
+echo "   4. Run: ./clean.sh --post-upgrade (if UBNT leftovers)"
+echo "   5. Reboot: sudo reboot"
+echo "   6. Run this check again after reboot"
 
 echo ""
 echo "💡 Remember: linux-image-3.10.20-ubnt-mtk is PROTECTED"
