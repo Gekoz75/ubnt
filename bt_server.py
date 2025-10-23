@@ -2,57 +2,80 @@
 import bluetooth
 import subprocess
 import time
+import sys
 import os
+import logging
 
-print("=== NO-PIN BLUETOOTH SERVER ===")
+LOGFILE = "/var/log/btserver.log"
+logging.basicConfig(filename=LOGFILE, level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Force "Just Works" pairing (no PIN)
-os.system("sudo hciconfig hci0 down 2>/dev/null")
-os.system("sudo hciconfig hci0 up 2>/dev/null")
-os.system("sudo hciconfig hci0 sspmode 1 2>/dev/null")  # ENABLE SSP for "Just Works"
-os.system("sudo hciconfig hci0 name 'CloudKey-NoPIN' 2>/dev/null")
-os.system("sudo hciconfig hci0 piscan 2>/dev/null")
+print("=== CloudKey Bluetooth Shell (No-PIN) ===")
 
-# Configure for "Just Works" pairing
-os.system("sudo btmgmt power off 2>/dev/null")
-os.system("sudo btmgmt io-capability NoInputNoOutput 2>/dev/null")
-os.system("sudo btmgmt bondable on 2>/dev/null")
-os.system("sudo btmgmt ssp on 2>/dev/null")
-os.system("sudo btmgmt power on 2>/dev/null")
-
-time.sleep(2)
-
-print("✅ Configured for 'Just Works' pairing (no PIN required)")
-
-server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-server_sock.bind(("", 1))
-server_sock.listen(1)
-
-print("📍 MAC: 74:83:C2:70:F0:1E")
-print("🏷️  Name: CloudKey-NoPIN")
-print("🔓 No PIN required - 'Just Works' pairing")
-print("")
-
-while True:
+def run_cmd(cmd):
+    """Run a shell command quickly and return (stdout + stderr)."""
     try:
-        client_sock, address = server_sock.accept()
-        print(f"🎉 CONNECTED: {address}")
-        
-        client_sock.send(b"Connected - No PIN required!\n> ")
-        
-        while True:
-            data = client_sock.recv(1024).decode().strip()
-            if not data: break
-            try:
-                result = subprocess.run(data, shell=True, capture_output=True, text=True)
-                output = result.stdout + result.stderr or "OK"
-            except Exception as e:
-                output = f"Error: {e}"
-            client_sock.send(output.encode() + b"> ")
-            
-        client_sock.close()
-        print("Client disconnected")
-        
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        return result.stdout + result.stderr
     except Exception as e:
-        print(f"Error: {e}")
-        time.sleep(2)
+        return f"Error: {e}\n"
+
+def setup_bt():
+    cmds = [
+        "hciconfig hci0 down",
+        "hciconfig hci0 up",
+        "hciconfig hci0 name 'CloudKey-NoPIN'",
+        "hciconfig hci0 sspmode 1",
+        "hciconfig hci0 piscan",
+        "btmgmt power off",
+        "btmgmt io-capability NoInputNoOutput",
+        "btmgmt bondable on",
+        "btmgmt ssp on",
+        "btmgmt power on",
+    ]
+    for c in cmds:
+        subprocess.run(c, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    logging.info("Bluetooth configured for Just Works pairing")
+
+def register_spp():
+    """Register Serial Port Profile so Windows sees COM port."""
+    subprocess.run("sdptool add SP", shell=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    logging.info("SPP service registered")
+
+def main():
+    setup_bt()
+    register_spp()
+
+    server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+    server_sock.bind(("", 1))
+    server_sock.listen(1)
+    logging.info("Bluetooth RFCOMM server started (channel 1)")
+
+    while True:
+        try:
+            print("Waiting for Bluetooth connection...")
+            client_sock, addr = server_sock.accept()
+            logging.info(f"Client connected: {addr}")
+            print(f"🎉 CONNECTED: {addr}")
+            client_sock.send(b"Connected to CloudKey!\n> ")
+
+            while True:
+                data = client_sock.recv(1024).decode(errors="ignore").strip()
+                if not data:
+                    break
+                output = run_cmd(data)
+                client_sock.send(output.encode() + b"> ")
+            
+        except Exception as e:
+            logging.error(f"Error: {e}")
+            time.sleep(1)
+        finally:
+            try:
+                client_sock.close()
+                logging.info("Client disconnected")
+            except:
+                pass
+
+if __name__ == "__main__":
+    main()
