@@ -1,87 +1,154 @@
 #!/usr/bin/env python3
 import os
-import sys
-import subprocess
-import bluetooth
 import pty
+import select
+import socket
+import subprocess
+import sys
 import time
+import logging
+from bluetooth import *
 
-BT_ADDR = "74:83:C2:70:F0:1E"  # Your CloudKey adapter address
+# -----------------------------------------------
+# Configuration
+# -----------------------------------------------
+SERVER_NAME = "UniFi-SPP"
+BT_ADDR = "74:83:C2:70:F0:1E"  # Your adapter's BD_ADDR
 BT_CHANNEL = 1
-BT_NAME = "CloudKey-NoPIN"
+SERVICE_UUID = "00001101-0000-1000-8000-00805F9B34FB"  # Serial Port UUID
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+log = logging.getLogger("BT-SPP")
+
+# -----------------------------------------------
+# Helper to run shell commands
+# -----------------------------------------------
 def run_cmd(cmd):
-    """Run shell command with output + status."""
-    print(f"[CMD] {cmd}")
-    result = subprocess.run(cmd, shell=True, text=True, capture_output=True)
-    if result.returncode == 0:
-        print(f"[OK] {cmd.split()[0]}: {result.stdout.strip() or 'Done'}")
-    else:
-        print(f"[ERROR] {cmd.split()[0]} failed:\n{result.stderr}")
-    return result.returncode
+    log.debug(f"$ {cmd}")
+    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out, _ = proc.communicate()
+    out = out.decode(errors="ignore").strip()
+    if out:
+        log.debug(out)
+    return out, proc.returncode
 
+# -----------------------------------------------
+# Step 1: Initialize Bluetooth interface
+# -----------------------------------------------
 def init_bluetooth():
-    """Initialize adapter, name, discoverability, and SDP service."""
-    print("[INFO] === Bluetooth Initialization ===")
+    log.info("=== Bluetooth Initialization ===")
+    run_cmd("hciconfig hci0 down")
+    time.sleep(1)
     run_cmd("hciconfig hci0 up")
-    run_cmd(f"hciconfig hci0 name '{BT_NAME}'")
-    run_cmd("hciconfig hci0 piscan")
+    run_cmd(f"hciconfig hci0 name {SERVER_NAME}")
+    run_cmd("hciconfig hci0 class 0x5A020C")  # Smartphone-like, to make visible to Windows
+    run_cmd("hciconfig hci0 piscan")  # Discoverable + connectable
+    log.info("Adapter is UP and Discoverable")
 
-    # Show current adapter info
-    run_cmd("hciconfig -a hci0")
+    out, _ = run_cmd("hciconfig hci0")
+    log.debug(out)
 
-    print("[INFO] Registering Serial Port Profile (SPP)...")
-    run_cmd("sdptool add --channel=1 SP")
+# -----------------------------------------------
+# Step 2: Remove old SDP records
+# -----------------------------------------------
+def clean_sdp():
+    log.info("Cleaning old SDP records...")
+    for handle in range(0x10001, 0x10010):
+        out, rc = run_cmd(f"sdptool del 0x{handle:05X}")
+        if "not found" not in out:
+            log.debug(f"Deleted handle 0x{handle:05X}")
 
+# -----------------------------------------------
+# Step 3: Create RFCOMM server
+# -----------------------------------------------
 def create_rfcomm_server():
-    """Create and bind RFCOMM socket to fixed adapter address."""
-    print(f"[INFO] Creating RFCOMM socket bound to {BT_ADDR}:{BT_CHANNEL}")
-    try:
-        sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-        sock.bind((BT_ADDR, BT_CHANNEL))
-        sock.listen(1)
-        print(f"[OK] RFCOMM server listening on channel {BT_CHANNEL}")
-        return sock
-    except OSError as e:
-        print(f"[FATAL] RFCOMM bind failed: {e}")
-        sys.exit(1)
+    log.info(f"Creating RFCOMM server on {BT_ADDR}, channel {BT_CHANNEL}")
+    sock = BluetoothSocket(RFCOMM)
+    sock.bind((BT_ADDR, BT_CHANNEL))
+    sock.listen(1)
+    log.info("RFCOMM socket ready and listening.")
+    return sock
 
-def setup_pty():
-    """Create pseudo-terminal for bridging."""
-    print("[INFO] Creating pseudo-terminal (PTY)...")
+# -----------------------------------------------
+# Step 4: Register SPP Service
+# -----------------------------------------------
+def register_spp_service(sock):
+    log.info("Registering Serial Port Profile (UUID 1101)...")
+    advertise_service(
+        sock,
+        SERVER_NAME,
+        service_id=SERVICE_UUID,
+        service_classes=[SERVICE_UUID],
+        profiles=[(SERVICE_UUID, 0x0100)],
+        provider="UniFi",
+        description="UniFi CloudKey Bluetooth SPP Bridge"
+    )
+    log.info("Service registered successfully.")
+
+# -----------------------------------------------
+# Step 5: Create PTY bridge
+# -----------------------------------------------
+def create_pty():
     master_fd, slave_fd = pty.openpty()
     slave_name = os.ttyname(slave_fd)
-    print(f"[OK] PTY created: {slave_name}")
+    log.info(f"PTY created: {slave_name}")
     return master_fd, slave_name
 
-def main():
-    print("[INFO] === Starting Bluetooth SPP Diagnostic Server ===")
-    init_bluetooth()
-
-    sock = create_rfcomm_server()
-    master_fd, slave_name = setup_pty()
-
-    print("[INFO] Waiting for incoming Bluetooth RFCOMM connection...")
-    client_sock, client_info = sock.accept()
-    print(f"[OK] Connection established from {client_info}")
-
-    # Simple data bridge demo (echo + PTY)
+# -----------------------------------------------
+# Step 6: Bridge RFCOMM <-> PTY
+# -----------------------------------------------
+def bridge_loop(client_sock, master_fd):
+    log.info("Starting bidirectional data bridge (RFCOMM <-> PTY)")
+    client_sock.setblocking(False)
     try:
         while True:
-            data = client_sock.recv(1024)
-            if not data:
-                print("[WARN] Client disconnected.")
-                break
-            os.write(master_fd, data)
-            echo = os.read(master_fd, 1024)
-            if echo:
-                client_sock.send(echo)
+            rlist, _, _ = select.select([client_sock, master_fd], [], [])
+            for src in rlist:
+                if src == client_sock:
+                    data = client_sock.recv(1024)
+                    if not data:
+                        log.info("Bluetooth client disconnected.")
+                        return
+                    os.write(master_fd, data)
+                    log.debug(f"[BT→PTY] {data!r}")
+                else:
+                    data = os.read(master_fd, 1024)
+                    if not data:
+                        continue
+                    client_sock.send(data)
+                    log.debug(f"[PTY→BT] {data!r}")
     except KeyboardInterrupt:
-        print("[INFO] Interrupted, closing sockets.")
+        log.info("Interrupted by user.")
     finally:
         client_sock.close()
-        sock.close()
-        print("[OK] Bluetooth server shut down cleanly.")
+
+# -----------------------------------------------
+# Main entry point
+# -----------------------------------------------
+def main():
+    log.info("=== Starting Bluetooth SPP Diagnostic Server ===")
+    init_bluetooth()
+    clean_sdp()
+
+    server_sock = create_rfcomm_server()
+    register_spp_service(server_sock)
+
+    master_fd, slave_name = create_pty()
+    log.info(f"Waiting for incoming RFCOMM connections... (PTY: {slave_name})")
+
+    try:
+        client_sock, client_info = server_sock.accept()
+        log.info(f"Accepted Bluetooth connection from {client_info}")
+        bridge_loop(client_sock, master_fd)
+    except Exception as e:
+        log.error(f"Error in main loop: {e}")
+    finally:
+        server_sock.close()
+        log.info("Server stopped.")
 
 if __name__ == "__main__":
     main()
